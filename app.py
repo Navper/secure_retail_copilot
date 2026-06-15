@@ -37,6 +37,12 @@ st.set_page_config(
 # ─────────────────────────────────────────────
 db.init_db()
 
+# Limpieza periódica del rate_limit_log (Fix #2)
+# Se ejecuta una vez por sesión al arrancar; elimina entradas > 5 min
+if "rate_cleanup_done" not in st.session_state:
+    db.cleanup_rate_limit_log(keep_seconds=300)
+    st.session_state.rate_cleanup_done = True
+
 # ─────────────────────────────────────────────
 # Session ID único para rate limiting
 # ─────────────────────────────────────────────

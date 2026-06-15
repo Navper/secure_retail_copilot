@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 load_dotenv()
 
 import database as db
+import auth
 
 # ─────────────────────────────────────────────
 # Configuración de página
@@ -33,7 +34,7 @@ st.set_page_config(
 # ─────────────────────────────────────────────
 # Autenticación (misma contraseña que admin)
 # ─────────────────────────────────────────────
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+# Fix #3: La contraseña se verifica via auth.py con SHA256 + hmac.compare_digest()
 
 if "sec_authenticated" not in st.session_state:
     st.session_state.sec_authenticated = False
@@ -44,7 +45,7 @@ if not st.session_state.sec_authenticated:
     with st.form("sec_login"):
         pwd = st.text_input("Contraseña de administrador", type="password")
         if st.form_submit_button("Acceder"):
-            if pwd == ADMIN_PASSWORD:
+            if auth.verify_admin_password(pwd):
                 st.session_state.sec_authenticated = True
                 st.rerun()
             else:

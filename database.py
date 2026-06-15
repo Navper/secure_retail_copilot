@@ -41,6 +41,21 @@ CREATE TABLE IF NOT EXISTS conversation_logs (
 );
 """
 
+# Fix #2 — Rate limit persistente en SQLite
+_CREATE_RATE_LIMIT_SQL = """
+CREATE TABLE IF NOT EXISTS rate_limit_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT    NOT NULL,
+    timestamp  TEXT    NOT NULL
+);
+"""
+
+# Índice para acelerar las consultas de ventana deslizante
+_CREATE_RATE_LIMIT_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_rate_limit_session_ts
+    ON rate_limit_log (session_id, timestamp);
+"""
+
 
 def _get_connection() -> sqlite3.Connection:
     """Retorna una conexión a la base de datos con row_factory habilitado."""
@@ -60,6 +75,8 @@ def init_db() -> None:
     with _get_connection() as conn:
         conn.execute(_CREATE_TABLE_SQL)
         conn.execute(_CREATE_LOGS_SQL)
+        conn.execute(_CREATE_RATE_LIMIT_SQL)
+        conn.execute(_CREATE_RATE_LIMIT_INDEX_SQL)
         conn.commit()
 
         # Comprobamos si la tabla ya tiene datos
@@ -229,24 +246,31 @@ def get_logs(
     Returns:
         DataFrame ordenado por timestamp descendente.
     """
+    # Fix #6: SQL completamente parametrizado, sin f-strings con input externo
     conditions = []
     params: list = []
 
     if only_flagged:
         conditions.append("blocked = 1")
     if threat_filter:
-        conditions.append("threat_type = ?")
-        params.append(threat_filter)
+        # threat_filter viene de un selectbox interno — validamos igualmente
+        allowed_threats = {
+            "jailbreak", "prompt_injection", "system_prompt_leak",
+            "off_topic", "output_leak", "rate_limit", "input_too_long",
+        }
+        if threat_filter in allowed_threats:
+            conditions.append("threat_type = ?")
+            params.append(threat_filter)
 
+    # Construimos la cláusula WHERE solo con condiciones permitidas (sin input directo)
     where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
 
     with _get_connection() as conn:
-        return pd.read_sql_query(
-            f"SELECT * FROM conversation_logs {where_clause} ORDER BY id DESC LIMIT ?",
-            conn,
-            params=params,
-        )
+        # La query usa ? para todos los valores; where_clause solo contiene
+        # literales internos ('blocked = 1', 'threat_type = ?'), no datos de usuario.
+        query = f"SELECT * FROM conversation_logs {where_clause} ORDER BY id DESC LIMIT ?"  # noqa: S608
+        return pd.read_sql_query(query, conn, params=params)
 
 
 def get_security_stats() -> dict:
@@ -284,5 +308,63 @@ def clear_logs() -> int:
     """Elimina todos los logs de conversación. Retorna el número de filas eliminadas."""
     with _get_connection() as conn:
         cursor = conn.execute("DELETE FROM conversation_logs")
+        conn.commit()
+        return cursor.rowcount
+
+
+# ─────────────────────────────────────────────
+# Rate Limit persistente (Fix #2)
+# ─────────────────────────────────────────────
+def record_rate_event(session_id: str) -> None:
+    """
+    Registra un evento de mensaje en la tabla rate_limit_log.
+    Persiste entre reinicios de Streamlit a diferencia del dict en memoria.
+    """
+    from datetime import datetime, timezone
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with _get_connection() as conn:
+        conn.execute(
+            "INSERT INTO rate_limit_log (session_id, timestamp) VALUES (?, ?)",
+            (session_id, timestamp),
+        )
+        conn.commit()
+
+
+def count_recent_messages(session_id: str, window_seconds: int = 60) -> int:
+    """
+    Cuenta cuántos mensajes ha enviado session_id en los últimos window_seconds.
+
+    Args:
+        session_id: ID de la sesión de Streamlit.
+        window_seconds: Tamaño de la ventana deslizante en segundos.
+
+    Returns:
+        Número de mensajes en la ventana.
+    """
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window_seconds)).isoformat()
+    with _get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM rate_limit_log WHERE session_id = ? AND timestamp > ?",
+            (session_id, cutoff),
+        ).fetchone()
+        return row[0] if row else 0
+
+
+def cleanup_rate_limit_log(keep_seconds: int = 300) -> int:
+    """
+    Elimina entradas antiguas del rate_limit_log para evitar crecimiento indefinido.
+    Mantiene solo los últimos keep_seconds segundos (default: 5 minutos).
+
+    Returns:
+        Número de filas eliminadas.
+    """
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=keep_seconds)).isoformat()
+    with _get_connection() as conn:
+        cursor = conn.execute(
+            "DELETE FROM rate_limit_log WHERE timestamp < ?",
+            (cutoff,),
+        )
         conn.commit()
         return cursor.rowcount

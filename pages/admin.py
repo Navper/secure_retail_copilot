@@ -23,6 +23,7 @@ load_dotenv()
 
 import database as db
 import rag_pipeline as rag
+import auth
 
 # ─────────────────────────────────────────────
 # Configuración de página
@@ -36,7 +37,8 @@ st.set_page_config(
 # ─────────────────────────────────────────────
 # Autenticación simple con contraseña
 # ─────────────────────────────────────────────
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+# Fix #3: La contraseña se verifica via auth.py con SHA256 + hmac.compare_digest()
+# Ver auth.py para instrucciones de cómo configurar ADMIN_PASSWORD_HASH en .env
 
 if "admin_authenticated" not in st.session_state:
     st.session_state.admin_authenticated = False
@@ -50,7 +52,7 @@ if not st.session_state.admin_authenticated:
         submitted = st.form_submit_button("Acceder")
 
     if submitted:
-        if password == ADMIN_PASSWORD:
+        if auth.verify_admin_password(password):
             st.session_state.admin_authenticated = True
             st.rerun()
         else:
